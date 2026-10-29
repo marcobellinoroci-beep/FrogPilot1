@@ -19,6 +19,10 @@ class FrogPilotVCruise:
 
     self.force_stop_timer = 0
     self.stop_distance = 0
+    self.csc_controlling_speed = False
+    self.csc_target = 0
+    self.slc_offset = 0
+    self.slc_target = 0
 
   def update(self, gps_position, now, time_validated, v_cruise, v_ego, sm, frogpilot_toggles):
     self.update_force_stop(v_ego, sm, frogpilot_toggles)

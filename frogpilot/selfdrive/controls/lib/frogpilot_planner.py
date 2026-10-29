@@ -75,7 +75,7 @@ class FrogPilotPlanner:
 
       self.cem.stop_sign_and_light(v_ego, sm, PLANNER_TIME - 2)
 
-    self.driving_in_curve = abs(self.lateral_acceleration) >= MINIMUM_LATERAL_ACCELERATION
+    self.driving_in_curve = abs(sm["carState"].vEgo**2 * sm["controlsState"].curvature) >= MINIMUM_LATERAL_ACCELERATION
 
     self.frogpilot_events.update(v_cruise, sm, frogpilot_toggles)
 
@@ -152,7 +152,7 @@ class FrogPilotPlanner:
 
   def publish(self, theme_updated, toggles_updated, sm, pm, frogpilot_toggles):
     frogpilot_plan_send = messaging.new_message("frogpilotPlan")
-    frogpilot_plan_send.valid = sm.all_checks(service_list=["carState", "controlsState"])
+    frogpilot_plan_send.valid = sm.all_checks(service_list=[      "carState", "controlsState", "radarState", "modelV2",      "liveParameters", "carControl", "frogpilotCarState",     ])
     frogpilotPlan = frogpilot_plan_send.frogpilotPlan
 
     frogpilotPlan.accelerationJerk = A_CHANGE_COST * self.frogpilot_following.acceleration_jerk

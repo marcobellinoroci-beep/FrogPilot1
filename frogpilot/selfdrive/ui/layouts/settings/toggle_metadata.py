@@ -35,7 +35,27 @@ class ToggleDefinition:
   unit: str | None = None
   value_map: dict[int, str] | None = None
 
-
+  
+  def __hash__(self):
+    return hash((
+      tuple(self.button_labels or ()),
+      tuple(self.button_options or ()),
+      tuple(self.car_params or ()),
+      tuple(self.depends_on or ()),
+      self.description,
+      self.icon,
+      self.max_value,
+      self.min_value,
+      self.param,
+      self.parent_param,
+      self.reboot_required,
+      self.step,
+      self.title,
+      self.toggle_type,
+      self.tuning_level,
+      self.unit,
+      tuple(sorted((self.value_map or {}).items())),
+    ))
 TUNING_LEVEL_TOGGLE = ToggleDefinition(
   title=("Tuning Level"),
   param="TuningLevel",
@@ -250,7 +270,7 @@ ALERTS_AND_SOUNDS_TOGGLES = (
     button_labels=["Test"],
     description=("<b>Set the volume for softer warnings about potential risks.</b><br><br>Examples include: \"BRAKE! Risk of Collision\", \"Steering Temporarily Unavailable\"."),
     max_value=101,
-    min_value=25,
+    min_value=0,
     parent_param="AlertVolumeControl",
     step=1,
     toggle_type=ToggleType.NUMERIC_WITH_BUTTON,
@@ -264,7 +284,7 @@ ALERTS_AND_SOUNDS_TOGGLES = (
     button_labels=["Test"],
     description=("<b>Set the volume for the loudest warnings that require urgent attention.</b><br><br>Examples include: \"DISENGAGE IMMEDIATELY — Driver Distracted\", \"DISENGAGE IMMEDIATELY — Driver Unresponsive\"."),
     max_value=101,
-    min_value=25,
+    min_value=0,
     parent_param="AlertVolumeControl",
     step=1,
     toggle_type=ToggleType.NUMERIC_WITH_BUTTON,
