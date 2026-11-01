@@ -165,29 +165,36 @@ class LongitudinalPlanner:
     if force_slow_decel:
       v_cruise = 0.0
 
-    # Experimental Roundabout + Stop Yield (Radar + OSM combined)
+    # Experimental Roundabout + Stop Yield (Radar + OSM combined) - configurable via web
     if frogpilot_toggles.roundabout_yield and 'frogpilotRadarState' in sm:
       radar = sm['frogpilotRadarState']
+      # Read configurable thresholds (fallback to defaults)
+      max_dist = float(getattr(frogpilot_toggles, 'roundabout_max_dist', 20.0))
+      min_vlead = float(getattr(frogpilot_toggles, 'roundabout_min_vlead', 1.0))
+      min_yrel = float(getattr(frogpilot_toggles, 'roundabout_min_yrel', 0.8))
+      speed_conflict = float(getattr(frogpilot_toggles, 'roundabout_speed_conflict', 14.0)) / 3.6
+      speed_no_conflict = float(getattr(frogpilot_toggles, 'roundabout_speed_no_conflict', 29.0)) / 3.6
+      speed_fallback = float(getattr(frogpilot_toggles, 'roundabout_speed_fallback', 18.0)) / 3.6
+      stop_speed = float(getattr(frogpilot_toggles, 'roundabout_stop_speed', 2.0)) / 3.6
+
       near_roundabout = sm['frogpilotPlan'].cscControllingSpeed or sm['frogpilotPlan'].forcingStop
-      left_conflict = radar.leadLeft.status and radar.leadLeft.dRel < 20.0 and radar.leadLeft.vLead > 1.0 and abs(radar.leadLeft.yRel) > 0.8
-      right_conflict = radar.leadRight.status and radar.leadRight.dRel < 20.0 and radar.leadRight.vLead > 1.0 and abs(radar.leadRight.yRel) > 0.8
+      left_conflict = radar.leadLeft.status and radar.leadLeft.dRel < max_dist and radar.leadLeft.vLead > min_vlead and abs(radar.leadLeft.yRel) > min_yrel
+      right_conflict = radar.leadRight.status and radar.leadRight.dRel < max_dist and radar.leadRight.vLead > min_vlead and abs(radar.leadRight.yRel) > min_yrel
 
       if near_roundabout:
         if left_conflict or right_conflict:
-          # Strong slowdown when OSM indicates roundabout/stop AND radar sees lateral traffic
-          v_cruise = min(v_cruise, 4.0)  # ~14 km/h
+          v_cruise = min(v_cruise, speed_conflict)
         elif sm['frogpilotPlan'].cscControllingSpeed:
-          # Milder slowdown near roundabout even without detected traffic
-          v_cruise = min(v_cruise, 8.0)  # ~29 km/h
+          v_cruise = min(v_cruise, speed_no_conflict)
       elif left_conflict:
-        # Fallback: lateral traffic even outside explicit OSM roundabout flag
-        v_cruise = min(v_cruise, 5.0)  # ~18 km/h
+        v_cruise = min(v_cruise, speed_fallback)
 
-    # Experimental Stop Yield: nearly stop if conflicting traffic at a forced stop
+    # Experimental Stop Yield
     if frogpilot_toggles.roundabout_yield and sm['frogpilotPlan'].forcingStop and 'frogpilotRadarState' in sm:
       radar = sm['frogpilotRadarState']
+      stop_speed = float(getattr(frogpilot_toggles, 'roundabout_stop_speed', 2.0)) / 3.6
       if (radar.leadLeft.status and radar.leadLeft.dRel < 25.0 and radar.leadLeft.vLead > 0.5) or          (radar.leadRight.status and radar.leadRight.dRel < 25.0 and radar.leadRight.vLead > 0.5):
-        v_cruise = min(v_cruise, 0.5)
+        v_cruise = min(v_cruise, stop_speed)
 
     if sm['frogpilotPlan'].forcingStop:
       stop_deceleration = -accel_clip[0]

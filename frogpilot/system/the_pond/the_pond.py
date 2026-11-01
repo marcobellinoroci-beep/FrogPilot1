@@ -114,6 +114,46 @@ def create_app():
     cloudlog.exception("The Pond could not complete a request")
     return jsonify(error="Could not complete this request. Please try again."), 500
 
+  @app.get("/experimental/roundabout")
+  def experimental_roundabout_page():
+    return render_template("experimental/roundabout.html")
+
+  @app.get("/api/experimental/roundabout")
+  def get_roundabout_settings():
+    params = Params()
+    try:
+      data = {
+        "enabled": params.get_bool("RoundaboutYield") if params.check_key("RoundaboutYield") else True,
+        "speed_conflict": float(params.get("RoundaboutSpeedConflict") or 14),
+        "speed_no_conflict": float(params.get("RoundaboutSpeedNoConflict") or 29),
+        "speed_fallback": float(params.get("RoundaboutSpeedFallback") or 18),
+        "max_dist": float(params.get("RoundaboutMaxDist") or 20),
+        "min_vlead": float(params.get("RoundaboutMinVLead") or 1.0),
+        "min_yrel": float(params.get("RoundaboutMinYRel") or 0.8),
+        "stop_speed": float(params.get("RoundaboutStopSpeed") or 2),
+      }
+    except Exception:
+      data = {"enabled": True, "speed_conflict": 14, "speed_no_conflict": 29, "speed_fallback": 18,
+              "max_dist": 20, "min_vlead": 1.0, "min_yrel": 0.8, "stop_speed": 2}
+    return jsonify(data)
+
+  @app.post("/api/experimental/roundabout")
+  def set_roundabout_settings():
+    params = Params()
+    data = request.get_json(force=True)
+    try:
+      params.put_bool("RoundaboutYield", bool(data.get("enabled", True)))
+      params.put("RoundaboutSpeedConflict", str(data.get("speed_conflict", 14)))
+      params.put("RoundaboutSpeedNoConflict", str(data.get("speed_no_conflict", 29)))
+      params.put("RoundaboutSpeedFallback", str(data.get("speed_fallback", 18)))
+      params.put("RoundaboutMaxDist", str(data.get("max_dist", 20)))
+      params.put("RoundaboutMinVLead", str(data.get("min_vlead", 1.0)))
+      params.put("RoundaboutMinYRel", str(data.get("min_yrel", 0.8)))
+      params.put("RoundaboutStopSpeed", str(data.get("stop_speed", 2)))
+      return jsonify({"status": "ok"})
+    except Exception as e:
+      return jsonify({"status": "error", "message": str(e)}), 500
+
   @app.get("/")
   @app.get("/<path:path>")
   def index(path=""):
