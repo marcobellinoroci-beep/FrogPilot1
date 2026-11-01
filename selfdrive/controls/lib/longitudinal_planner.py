@@ -181,19 +181,25 @@ class LongitudinalPlanner:
       left_conflict = radar.leadLeft.status and radar.leadLeft.dRel < max_dist and radar.leadLeft.vLead > min_vlead and abs(radar.leadLeft.yRel) > min_yrel
       right_conflict = radar.leadRight.status and radar.leadRight.dRel < max_dist and radar.leadRight.vLead > min_vlead and abs(radar.leadRight.yRel) > min_yrel
 
+      # Additional Tesla blind spot check (from side cameras)
+      tesla_blindspot = getattr(sm['carState'], 'leftBlindspot', False) or getattr(sm['carState'], 'rightBlindspot', False)
+
       if near_roundabout:
-        if left_conflict or right_conflict:
+        if left_conflict or right_conflict or tesla_blindspot:
           v_cruise = min(v_cruise, speed_conflict)
         elif sm['frogpilotPlan'].cscControllingSpeed:
           v_cruise = min(v_cruise, speed_no_conflict)
-      elif left_conflict:
+      elif left_conflict or tesla_blindspot:
         v_cruise = min(v_cruise, speed_fallback)
 
     # Experimental Stop Yield
     if frogpilot_toggles.roundabout_yield and sm['frogpilotPlan'].forcingStop and 'frogpilotRadarState' in sm:
       radar = sm['frogpilotRadarState']
       stop_speed = float(getattr(frogpilot_toggles, 'roundabout_stop_speed', 2.0)) / 3.6
-      if (radar.leadLeft.status and radar.leadLeft.dRel < 25.0 and radar.leadLeft.vLead > 0.5) or          (radar.leadRight.status and radar.leadRight.dRel < 25.0 and radar.leadRight.vLead > 0.5):
+      tesla_blindspot = getattr(sm['carState'], 'leftBlindspot', False) or getattr(sm['carState'], 'rightBlindspot', False)
+      if (radar.leadLeft.status and radar.leadLeft.dRel < 25.0 and radar.leadLeft.vLead > 0.5) or \
+         (radar.leadRight.status and radar.leadRight.dRel < 25.0 and radar.leadRight.vLead > 0.5) or \
+         tesla_blindspot:
         v_cruise = min(v_cruise, stop_speed)
 
     if sm['frogpilotPlan'].forcingStop:
