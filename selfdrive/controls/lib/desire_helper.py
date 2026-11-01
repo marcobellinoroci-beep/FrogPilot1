@@ -76,7 +76,8 @@ class DesireHelper:
     left_lane_safe = (frogpilotPlan.laneWidthLeft >= frogpilot_toggles.lane_detection_width or not frogpilot_toggles.lane_detection)
     left_blindspot_clear = not carstate.leftBlindspot
 
-    auto_overtake_ready = (not one_blinker and not below_lane_change_speed and slow_lead and
+    auto_overtake_enabled = getattr(frogpilot_toggles, 'auto_overtake', False)
+    auto_overtake_ready = (auto_overtake_enabled and not one_blinker and not below_lane_change_speed and slow_lead and
                            left_lane_safe and left_blindspot_clear and lateral_active)
 
     if not lateral_active or self.lane_change_timer > LANE_CHANGE_TIME_MAX or not frogpilot_toggles.lane_changes:
