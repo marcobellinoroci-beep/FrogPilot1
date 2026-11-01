@@ -165,25 +165,29 @@ class LongitudinalPlanner:
     if force_slow_decel:
       v_cruise = 0.0
 
-    # Experimental Roundabout Yield: slow down if a left adjacent lead is close
-    if frogpilot_toggles.roundabout_yield and 'frogpilotRadarState' in sm and sm['frogpilotRadarState'].leadLeft.status:
-      left_lead = sm['frogpilotRadarState'].leadLeft
-      if left_lead.dRel < 18.0 and left_lead.vLead > 1.5 and abs(left_lead.yRel) > 1.0:
-        # Force a reduced cruise speed when a potential conflicting left vehicle is detected
+    # Experimental Roundabout + Stop Yield (Radar + OSM combined)
+    if frogpilot_toggles.roundabout_yield and 'frogpilotRadarState' in sm:
+      radar = sm['frogpilotRadarState']
+      near_roundabout = sm['frogpilotPlan'].cscControllingSpeed or sm['frogpilotPlan'].forcingStop
+      left_conflict = radar.leadLeft.status and radar.leadLeft.dRel < 20.0 and radar.leadLeft.vLead > 1.0 and abs(radar.leadLeft.yRel) > 0.8
+      right_conflict = radar.leadRight.status and radar.leadRight.dRel < 20.0 and radar.leadRight.vLead > 1.0 and abs(radar.leadRight.yRel) > 0.8
+
+      if near_roundabout:
+        if left_conflict or right_conflict:
+          # Strong slowdown when OSM indicates roundabout/stop AND radar sees lateral traffic
+          v_cruise = min(v_cruise, 4.0)  # ~14 km/h
+        elif sm['frogpilotPlan'].cscControllingSpeed:
+          # Milder slowdown near roundabout even without detected traffic
+          v_cruise = min(v_cruise, 8.0)  # ~29 km/h
+      elif left_conflict:
+        # Fallback: lateral traffic even outside explicit OSM roundabout flag
         v_cruise = min(v_cruise, 5.0)  # ~18 km/h
 
-    # Experimental Stop Yield: at stop signs, hold if conflicting traffic is detected
+    # Experimental Stop Yield: nearly stop if conflicting traffic at a forced stop
     if frogpilot_toggles.roundabout_yield and sm['frogpilotPlan'].forcingStop and 'frogpilotRadarState' in sm:
       radar = sm['frogpilotRadarState']
-      conflict = False
-      # Always check left for right turns / straight; check both for left turns
-      # (direction info is limited; conservative: check left always, right if available)
-      if radar.leadLeft.status and radar.leadLeft.dRel < 25.0 and radar.leadLeft.vLead > 1.0:
-        conflict = True
-      if radar.leadRight.status and radar.leadRight.dRel < 25.0 and radar.leadRight.vLead > 1.0:
-        conflict = True
-      if conflict:
-        v_cruise = min(v_cruise, 0.5)  # nearly stopped until clear
+      if (radar.leadLeft.status and radar.leadLeft.dRel < 25.0 and radar.leadLeft.vLead > 0.5) or          (radar.leadRight.status and radar.leadRight.dRel < 25.0 and radar.leadRight.vLead > 0.5):
+        v_cruise = min(v_cruise, 0.5)
 
     if sm['frogpilotPlan'].forcingStop:
       stop_deceleration = -accel_clip[0]
