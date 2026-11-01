@@ -1,1 +1,1 @@
-CONTENT_FROM_/tmp/frogpilot_variables.py
+CONTENT_WILL_BE_REPLACED_BY_SCRIPT
