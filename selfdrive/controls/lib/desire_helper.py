@@ -9,6 +9,11 @@ TurnDirection = log.Desire
 LANE_CHANGE_SPEED_MIN = 20 * CV.MPH_TO_MS
 LANE_CHANGE_TIME_MAX = 10.
 
+# Experimental auto overtake thresholds
+AUTO_OVERTAKE_VREL_THRESHOLD = -1.5  # m/s (~5.4 km/h slower)
+AUTO_OVERTAKE_MIN_LEAD_DIST = 15.0
+AUTO_OVERTAKE_MAX_LEAD_DIST = 80.0
+
 DESIRES = {
   LaneChangeDirection.none: {
     LaneChangeState.off: log.Desire.none,
@@ -51,50 +56,86 @@ class DesireHelper:
 
     self.lane_change_wait_timer = 0
 
-  def update(self, carstate, lateral_active, lane_change_prob, frogpilotPlan, frogpilot_toggles):
+    # Auto overtake
+    self.auto_overtake_active = False
+
+  def update(self, carstate, lateral_active, lane_change_prob, frogpilotPlan, frogpilot_toggles, radar_state=None):
     v_ego = carstate.vEgo
     one_blinker = carstate.leftBlinker != carstate.rightBlinker
     below_lane_change_speed = v_ego < frogpilot_toggles.minimum_lane_change_speed
 
+    # Detect slow lead for auto overtake
+    slow_lead = False
+    if radar_state is not None and radar_state.leadOne.status:
+      lead = radar_state.leadOne
+      if (AUTO_OVERTAKE_MIN_LEAD_DIST < lead.dRel < AUTO_OVERTAKE_MAX_LEAD_DIST and
+          lead.vRel < AUTO_OVERTAKE_VREL_THRESHOLD):
+        slow_lead = True
+
+    # Left lane available and safe for auto overtake
+    left_lane_safe = (frogpilotPlan.laneWidthLeft >= frogpilot_toggles.lane_detection_width or not frogpilot_toggles.lane_detection)
+    left_blindspot_clear = not carstate.leftBlindspot
+
+    auto_overtake_ready = (not one_blinker and not below_lane_change_speed and slow_lead and
+                           left_lane_safe and left_blindspot_clear and lateral_active)
+
     if not lateral_active or self.lane_change_timer > LANE_CHANGE_TIME_MAX or not frogpilot_toggles.lane_changes:
       self.lane_change_state = LaneChangeState.off
       self.lane_change_direction = LaneChangeDirection.none
+      self.auto_overtake_active = False
     else:
       # LaneChangeState.off
-      if self.lane_change_state == LaneChangeState.off and one_blinker and not self.prev_one_blinker and not below_lane_change_speed:
-        self.lane_change_state = LaneChangeState.preLaneChange
-        self.lane_change_ll_prob = 1.0
-        self.lane_change_wait_timer = 0.0
+      if self.lane_change_state == LaneChangeState.off:
+        if one_blinker and not self.prev_one_blinker and not below_lane_change_speed:
+          self.lane_change_state = LaneChangeState.preLaneChange
+          self.lane_change_ll_prob = 1.0
+          self.lane_change_wait_timer = 0.0
+          self.auto_overtake_active = False
+        elif auto_overtake_ready:
+          self.lane_change_state = LaneChangeState.preLaneChange
+          self.lane_change_ll_prob = 1.0
+          self.lane_change_wait_timer = 0.0
+          self.auto_overtake_active = True
+          self.lane_change_direction = LaneChangeDirection.left
 
       # LaneChangeState.preLaneChange
       elif self.lane_change_state == LaneChangeState.preLaneChange:
         self.lane_change_wait_timer += DT_MDL
 
-        # Set lane change direction
-        self.lane_change_direction = LaneChangeDirection.left if \
-          carstate.leftBlinker else LaneChangeDirection.right
+        if not self.auto_overtake_active:
+          # Normal blinker-based
+          self.lane_change_direction = LaneChangeDirection.left if carstate.leftBlinker else LaneChangeDirection.right
 
-        torque_applied = carstate.steeringPressed and \
-                         ((carstate.steeringTorque > 0 and self.lane_change_direction == LaneChangeDirection.left) or
-                          (carstate.steeringTorque < 0 and self.lane_change_direction == LaneChangeDirection.right))
+          torque_applied = carstate.steeringPressed and \
+                           ((carstate.steeringTorque > 0 and self.lane_change_direction == LaneChangeDirection.left) or
+                            (carstate.steeringTorque < 0 and self.lane_change_direction == LaneChangeDirection.right))
 
-        if torque_applied:
-          self.lane_change_wait_timer = frogpilot_toggles.lane_change_delay
+          if torque_applied:
+            self.lane_change_wait_timer = frogpilot_toggles.lane_change_delay
+          else:
+            desired_lane_width = frogpilotPlan.laneWidthLeft if carstate.leftBlinker else frogpilotPlan.laneWidthRight
+            lane_available = desired_lane_width >= frogpilot_toggles.lane_detection_width or not frogpilot_toggles.lane_detection
+            torque_applied = lane_available and self.lane_change_wait_timer >= frogpilot_toggles.lane_change_delay and frogpilot_toggles.nudgeless
+
+          blindspot_detected = ((carstate.leftBlindspot and self.lane_change_direction == LaneChangeDirection.left) or
+                                (carstate.rightBlindspot and self.lane_change_direction == LaneChangeDirection.right))
+
+          if not one_blinker or below_lane_change_speed or self.lane_change_completed:
+            self.lane_change_state = LaneChangeState.off
+            self.lane_change_direction = LaneChangeDirection.none
+          elif torque_applied and not blindspot_detected:
+            self.lane_change_state = LaneChangeState.laneChangeStarting
+            self.lane_change_completed = frogpilot_toggles.one_lane_change
+            self.lane_change_wait_timer = 0.0
         else:
-          desired_lane_width = frogpilotPlan.laneWidthLeft if carstate.leftBlinker else frogpilotPlan.laneWidthRight
-          lane_available = desired_lane_width >= frogpilot_toggles.lane_detection_width or not frogpilot_toggles.lane_detection
-          torque_applied = lane_available and self.lane_change_wait_timer >= frogpilot_toggles.lane_change_delay and frogpilot_toggles.nudgeless
-
-        blindspot_detected = ((carstate.leftBlindspot and self.lane_change_direction == LaneChangeDirection.left) or
-                              (carstate.rightBlindspot and self.lane_change_direction == LaneChangeDirection.right))
-
-        if not one_blinker or below_lane_change_speed or self.lane_change_completed:
-          self.lane_change_state = LaneChangeState.off
-          self.lane_change_direction = LaneChangeDirection.none
-        elif torque_applied and not blindspot_detected:
-          self.lane_change_state = LaneChangeState.laneChangeStarting
-          self.lane_change_completed = frogpilot_toggles.one_lane_change
-          self.lane_change_wait_timer = 0.0
+          # Auto overtake path (left only, no blinker required)
+          if not auto_overtake_ready or below_lane_change_speed:
+            self.lane_change_state = LaneChangeState.off
+            self.lane_change_direction = LaneChangeDirection.none
+            self.auto_overtake_active = False
+          elif self.lane_change_wait_timer >= 1.0 and not carstate.leftBlindspot:  # short delay
+            self.lane_change_state = LaneChangeState.laneChangeStarting
+            self.lane_change_wait_timer = 0.0
 
       # LaneChangeState.laneChangeStarting
       elif self.lane_change_state == LaneChangeState.laneChangeStarting:
@@ -112,6 +153,7 @@ class DesireHelper:
 
         if self.lane_change_ll_prob > 0.99:
           self.lane_change_direction = LaneChangeDirection.none
+          self.auto_overtake_active = False
           if one_blinker:
             self.lane_change_state = LaneChangeState.preLaneChange
           else:
