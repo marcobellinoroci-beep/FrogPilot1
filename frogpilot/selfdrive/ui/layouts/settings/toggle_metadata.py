@@ -1,1 +1,1 @@
-CONTENT_FROM_FILE
+CONTENT_FROM_/tmp/toggle_metadata.py
