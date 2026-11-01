@@ -172,6 +172,19 @@ class LongitudinalPlanner:
         # Force a reduced cruise speed when a potential conflicting left vehicle is detected
         v_cruise = min(v_cruise, 5.0)  # ~18 km/h
 
+    # Experimental Stop Yield: at stop signs, hold if conflicting traffic is detected
+    if frogpilot_toggles.roundabout_yield and sm['frogpilotPlan'].forcingStop and 'frogpilotRadarState' in sm:
+      radar = sm['frogpilotRadarState']
+      conflict = False
+      # Always check left for right turns / straight; check both for left turns
+      # (direction info is limited; conservative: check left always, right if available)
+      if radar.leadLeft.status and radar.leadLeft.dRel < 25.0 and radar.leadLeft.vLead > 1.0:
+        conflict = True
+      if radar.leadRight.status and radar.leadRight.dRel < 25.0 and radar.leadRight.vLead > 1.0:
+        conflict = True
+      if conflict:
+        v_cruise = min(v_cruise, 0.5)  # nearly stopped until clear
+
     if sm['frogpilotPlan'].forcingStop:
       stop_deceleration = -accel_clip[0]
 
