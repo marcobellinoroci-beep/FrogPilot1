@@ -114,6 +114,35 @@ def create_app():
     cloudlog.exception("The Pond could not complete a request")
     return jsonify(error="Could not complete this request. Please try again."), 500
 
+  @app.get("/api/live/status")
+  def live_status():
+    from openpilot.common.realtime import DT_CTRL
+    import cereal.messaging as messaging
+    sm = messaging.SubMaster(["carState", "controlsState", "frogpilotPlan", "frogpilotRadarState", "modelV2"])
+    sm.update(0)
+    cs = sm["carState"] if sm.alive["carState"] else None
+    plan = sm["frogpilotPlan"] if sm.alive["frogpilotPlan"] else None
+    radar = sm["frogpilotRadarState"] if sm.alive["frogpilotRadarState"] else None
+    data = {
+      "vEgo": round(cs.vEgo * 3.6, 1) if cs else 0,
+      "vCruise": round(plan.vCruise * 3.6, 1) if plan else 0,
+      "standstill": bool(cs.standstill) if cs else False,
+      "enabled": bool(sm["controlsState"].enabled) if sm.alive["controlsState"] else False,
+      "forcingStop": bool(plan.forcingStop) if plan else False,
+      "cscControlling": bool(plan.cscControllingSpeed) if plan else False,
+      "leadLeft": {
+        "status": bool(radar.leadLeft.status) if radar else False,
+        "dRel": round(radar.leadLeft.dRel, 1) if radar and radar.leadLeft.status else 0,
+        "vLead": round(radar.leadLeft.vLead * 3.6, 1) if radar and radar.leadLeft.status else 0,
+      } if radar else {"status": False},
+      "leadRight": {
+        "status": bool(radar.leadRight.status) if radar else False,
+        "dRel": round(radar.leadRight.dRel, 1) if radar and radar.leadRight.status else 0,
+        "vLead": round(radar.leadRight.vLead * 3.6, 1) if radar and radar.leadRight.status else 0,
+      } if radar else {"status": False},
+    }
+    return jsonify(data)
+
   @app.get("/experimental/roundabout")
   def experimental_roundabout_page():
     return render_template("experimental/roundabout.html")

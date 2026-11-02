@@ -25,7 +25,14 @@
     <h1>Roundabout Yield (Experimental)</h1>
     <p>Parametri per la logica combinata radar + OSM nelle rotatorie e agli stop.</p>
 
-    <div class="card">
+        <div class="card" id="live-dashboard" style="border-left: 4px solid #4ade80;">
+      <h3>Dati in tempo reale</h3>
+      <div id="live-data" style="font-family: monospace; font-size: 14px; line-height: 1.6;">
+        Caricamento...
+      </div>
+    </div>
+
+<div class="card">
       <div class="toggle">
         <input type="checkbox" id="enabled" checked>
         <label for="enabled">Attiva Roundabout Yield</label>
@@ -123,6 +130,28 @@
       }
       setTimeout(() => status.style.display = 'none', 5000);
     }
+
+    
+    async function updateLive() {
+      try {
+        const res = await fetch("/api/live/status");
+        if (res.ok) {
+          const d = await res.json();
+          const el = document.getElementById("live-data");
+          el.innerHTML = `
+            Velocità: <b>${d.vEgo} km/h</b> | Cruise: <b>${d.vCruise} km/h</b><br>
+            Engaged: ${d.enabled ? "Sì" : "No"} | Standstill: ${d.standstill ? "Sì" : "No"}<br>
+            Forcing Stop: ${d.forcingStop ? "Sì" : "No"} | CSC: ${d.cscControlling ? "Sì" : "No"}<br>
+            Lead Left: ${d.leadLeft.status ? d.leadLeft.dRel + "m / " + d.leadLeft.vLead + "km/h" : "nessuno"}<br>
+            Lead Right: ${d.leadRight.status ? d.leadRight.dRel + "m / " + d.leadRight.vLead + "km/h" : "nessuno"}
+          `;
+        }
+      } catch (e) {
+        document.getElementById("live-data").textContent = "Nessun dato live (dispositivo non in guida o errore)";
+      }
+    }
+    setInterval(updateLive, 1000);
+    updateLive();
 
     loadSettings();
   </script>
