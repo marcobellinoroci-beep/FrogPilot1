@@ -1,282 +1,221 @@
 #!/usr/bin/env python3
-import asyncio
-import hashlib
-import hmac
-import ipaddress
-import json
-import re
-import socket
-import subprocess
 import threading
 import time
 
-from aiohttp import web
+from flask import Flask, abort, jsonify, render_template, request
+from werkzeug.exceptions import HTTPException
 
-from openpilot.system.hardware import HARDWARE, PC
+from openpilot.common.params import Params
+from openpilot.common.swaglog import cloudlog
+from openpilot.system.hardware import PC
 
-from openpilot.frogpilot.common import frogpilot_paths, frogpilot_utilities, frogpilot_variables
-from openpilot.frogpilot.system.the_pond import (backups, dashcam, device, discovery, doors, home, keys, maps, models, navigation, screen_recordings, search,
-                                                 software, tailscale, theme_maker, themes, toggles, tools, utilities, vehicle)
+from openpilot.frogpilot.common.frogpilot_api import FrogPilotAPI
+from openpilot.frogpilot.system.the_pond import device, discovery, helpers, logs, media, navigation, tailscale, themes
 
-API_VERSION = 1
+PAGE_PATHS = {
+  "/", "/dashcam_routes", "/download_speed_limits", "/lock_or_unlock_doors", "/manage_error_logs", "/manage_navigation_keys",
+  "/manage_tailscale", "/manage_tmux", "/manage_toggles", "/screen_recordings", "/set_navigation_destination", "/theme_maker", "/tsk_manager",
+}
 
-ASSET_CACHE_CONTROL = "public, max-age=31536000, immutable"
-ASSET_LINK_PATTERN = re.compile(r'((?:href|src)="/assets/[^"?]+)"')
+PORT = 8082
+PORTS = {80, PORT}
+if PC:
+  PORT = 8083
+  PORTS = {PORT}
 
-COMPRESSED_EXTENSIONS = (".css", ".js", ".svg")
-
-CONTENT_SECURITY_POLICY = "; ".join((
+CSP = "; ".join([
   "default-src 'self'",
-  "connect-src 'self' https://api.mapbox.com https://events.mapbox.com",
-  "frame-ancestors 'none'",
-  "img-src 'self' blob: data: https://api.mapbox.com",
+  "script-src 'self'",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data: blob: https://api.mapbox.com https://*.tiles.mapbox.com",
+  "media-src 'self' blob:",
+  "font-src 'self' data:",
+  "connect-src 'self' https://api.mapbox.com https://events.mapbox.com https://*.tiles.mapbox.com",
+  "worker-src blob:",
+  "child-src blob:",
   "object-src 'none'",
-  "worker-src 'self' blob:",
-))
+  "base-uri 'self'",
+  "form-action 'self'",
+  "frame-ancestors 'none'",
+])
 
-HOTSPOT_SUBNET = "192.168.43.0/24"
 
-LOCK_CHECK_INTERVAL = 0.5
-MAX_UPLOAD_SIZE = 100 * 1024 * 1024
-
-OPEN_PATHS = {"/api/pair", "/api/state"}
-
-PAIRING_ATTEMPTS = 10
-PAIRING_WINDOW = 10 * 60
-
-HOTSPOT_RETURN_RULE = ["PREROUTING", "-s", HOTSPOT_SUBNET, "!", "-d", HOTSPOT_SUBNET, "-p", "tcp", "--dport", "80", "-j", "RETURN"]
-PORT_REDIRECT_RULE = ["PREROUTING", "-p", "tcp", "--dport", "80", "-j", "REDIRECT", "--to-ports", str(frogpilot_variables.THE_POND_PORT)]
-
-async def is_allowed_host(host):
-  if host.startswith("["):
-    name = host[1:].partition("]")[0]
-  else:
-    name = host.partition(":")[0]
-
+def locked_stream(source):
+  checked = 0
   try:
-    ipaddress.ip_address(name)
-    return True
-  except ValueError:
-    pass
+    for chunk in source:
+      now = time.monotonic()
+      if now - checked >= 1:
+        if device.is_driving():
+          return
+        checked = now
 
-  name = name.lower().rstrip(".")
-  allowed_names = {"localhost", frogpilot_variables.THE_POND_HOSTNAME.lower(), f"{socket.gethostname().lower()}.local"}
-  return name in allowed_names or name.endswith(".ts.net") or await tailscale.is_device_name(name)
-
-
-def is_paired(the_pond, request):
-  if not the_pond.params.get_bool("ThePondPairing"):
-    return True
-
-  token = request.cookies.get(utilities.PAIRING_COOKIE)
-  authorization = request.headers.get("Authorization", "")
-  if authorization.startswith("Bearer "):
-    token = authorization.removeprefix("Bearer ")
-  if token is None:
-    return False
-
-  token_hash = hashlib.sha256(token.encode()).hexdigest()
-  return any(hmac.compare_digest(browser["hash"], token_hash) for browser in json.loads(the_pond.params.get("ThePondPairedBrowsers") or "[]"))
-
-
-@web.middleware
-async def guard(request, handler):
-  if not await is_allowed_host(request.host):
-    raise web.HTTPMisdirectedRequest(text="unknown_host")
-
-  origin = request.headers.get("Origin")
-  if request.method not in ("GET", "HEAD") and origin is not None and origin != f"{request.scheme}://{request.host}":
-    raise web.HTTPForbidden(text="cross_origin")
-
-  if request.path.startswith("/api/") and request.path not in OPEN_PATHS:
-    the_pond = request.app[utilities.THE_POND]
-    if the_pond.locked:
-      raise utilities.HTTPLocked(text="locked")
-    if not is_paired(the_pond, request):
-      raise web.HTTPUnauthorized(text="not_paired")
-
-    the_pond.connections.add(request.transport)
-
-  return await handler(request)
-
-
-@web.middleware
-async def compress_responses(request, handler):
-  response = await handler(request)
-  if response.content_type == "application/json" or request.path.endswith(COMPRESSED_EXTENSIONS):
-    response.enable_compression()
-  return response
-
-
-async def add_security_headers(request, response):
-  response.headers["Cache-Control"] = ASSET_CACHE_CONTROL if request.path.startswith("/assets/") and "v" in request.query else "no-cache"
-  response.headers["Content-Security-Policy"] = CONTENT_SECURITY_POLICY
-  response.headers["Referrer-Policy"] = "no-referrer"
-  response.headers["X-Content-Type-Options"] = "nosniff"
-
-
-async def get_state(request):
-  the_pond = request.app[utilities.THE_POND]
-  paired = is_paired(the_pond, request)
-  state = {
-    "api_version": API_VERSION,
-    "is_metric": the_pond.params.get_bool("IsMetric"),
-    "language": the_pond.params.get("LanguageSetting", encoding="utf-8"),
-    "locked": the_pond.locked,
-    "model": frogpilot_variables.DEVICE_MODELS[HARDWARE.get_device_type()],
-    "paired": paired,
-    "pairing": the_pond.params.get_bool("ThePondPairing"),
-    "tuning_level": frogpilot_variables.get_frogpilot_toggles(the_pond.sm).tuning_level,
-  }
-
-  if paired:
-    state["name"] = socket.gethostname()
-    state["version"] = the_pond.params.get("Version", encoding="utf-8")
-
-  return web.json_response(state)
-
-
-def get_asset_version():
-  digest = hashlib.sha256()
-  for path in sorted(frogpilot_paths.THE_POND_ASSETS_PATH.rglob("*")):
-    if path.is_file():
-      info = path.stat()
-      digest.update(f"{path.relative_to(frogpilot_paths.THE_POND_ASSETS_PATH)}:{info.st_size}:{info.st_mtime_ns}".encode())
-  return digest.hexdigest()[:12]
-
-
-async def index(request):
-  if request.path.startswith("/api/"):
-    raise web.HTTPNotFound(text="not_found")
-  html = ASSET_LINK_PATTERN.sub(rf'\1?v={get_asset_version()}"', (frogpilot_paths.THE_POND_ASSETS_PATH / "index.html").read_text())
-  return web.Response(text=html, content_type="text/html")
-
-
-async def pair(request):
-  the_pond = request.app[utilities.THE_POND]
-
-  now = time.monotonic()
-  the_pond.pairing_failures = [failure for failure in the_pond.pairing_failures if now - failure < PAIRING_WINDOW]
-  if len(the_pond.pairing_failures) >= PAIRING_ATTEMPTS:
-    raise web.HTTPTooManyRequests(text="too_many_attempts")
-
-  if not the_pond.params.get_bool("ThePondPairing"):
-    raise web.HTTPConflict(text="pairing_off")
-
-  the_pond.pairing_failures.append(now)
-
-  body = await utilities.read_json(request)
-  code = body.get("code")
-  pairing_code = the_pond.params.get("ThePondPairingCode", encoding="utf-8")
-  if not isinstance(code, str) or not pairing_code or not hmac.compare_digest(code.encode(), pairing_code.encode()):
-    raise web.HTTPForbidden(text="wrong_code")
-
-  the_pond.pairing_failures.remove(now)
-
-  name, token, options = utilities.pair_browser(the_pond.params, request)
-  if body.get("token") is True:
-    return web.json_response({"token": token})
-
-  response = web.Response(status=204)
-  response.set_cookie(name, token, **options)
-  return response
-
-
-async def prepare_drives(the_pond, previous_recordings):
-  await utilities.run_and_report(dashcam.prepare_routes(the_pond))
-  await utilities.run_and_report(screen_recordings.prepare_recordings(the_pond, previous_recordings))
-
-
-def watch_drive(the_pond):
-  drive_active = dashcam.is_drive_active(the_pond)
-  if drive_active and not the_pond.drive_active:
-    if the_pond.preparation is not None:
-      the_pond.preparation.cancel()
-    the_pond.recordings_before_drive = screen_recordings.get_recording_paths()
-  elif not drive_active and (the_pond.drive_active or the_pond.preparation is None):
-    the_pond.preparation = asyncio.create_task(prepare_drives(the_pond, the_pond.recordings_before_drive))
-  the_pond.drive_active = drive_active
-
-
-async def watch_lock(app):
-  the_pond = app[utilities.THE_POND]
-  while True:
-    the_pond.update()
-    watch_drive(the_pond)
-    await tools.close_idle_shell(the_pond)
-    await asyncio.sleep(LOCK_CHECK_INTERVAL)
-
-
-async def background_tasks(app):
-  tasks = [asyncio.create_task(watch_lock(app))]
-
-  yield
-
-  for task in tasks:
-    task.cancel()
-  await asyncio.gather(*tasks, return_exceptions=True)
-
-
-async def port_redirect(app):
-  if not PC:
-    if subprocess.run(["sudo", "iptables-legacy", "-t", "nat", "-C", *HOTSPOT_RETURN_RULE], capture_output=True).returncode != 0:
-      subprocess.run(["sudo", "iptables-legacy", "-t", "nat", "-I", *HOTSPOT_RETURN_RULE], capture_output=True, check=True)
-    if subprocess.run(["sudo", "iptables-legacy", "-t", "nat", "-C", *PORT_REDIRECT_RULE], capture_output=True).returncode != 0:
-      subprocess.run(["sudo", "iptables-legacy", "-t", "nat", "-A", *PORT_REDIRECT_RULE], capture_output=True, check=True)
-
-  yield
-
-  if not PC:
-    subprocess.run(["sudo", "iptables-legacy", "-t", "nat", "-D", *PORT_REDIRECT_RULE], capture_output=True, check=True)
-    subprocess.run(["sudo", "iptables-legacy", "-t", "nat", "-D", *HOTSPOT_RETURN_RULE], capture_output=True, check=True)
+      yield chunk
+  finally:
+    close = getattr(source, "close", None)
+    if close is not None:
+      close()
 
 
 def create_app():
-  app = web.Application(client_max_size=MAX_UPLOAD_SIZE, middlewares=[guard, compress_responses])
-  app[utilities.THE_POND] = utilities.ThePond()
+  app = Flask(__name__, static_folder="assets", static_url_path="/assets")
+  app.extensions["frogpilot_api"] = FrogPilotAPI(Params())
+  app.config["MAX_CONTENT_LENGTH"] = 32 * 1024 * 1024
+  app.config["POND_PORTS"] = PORTS
 
-  app.cleanup_ctx.append(background_tasks)
-  app.cleanup_ctx.append(port_redirect)
-  app.on_response_prepare.append(add_security_headers)
+  for feature in (device, logs, media, navigation, tailscale, themes):
+    app.register_blueprint(feature.blueprint)
 
-  app.router.add_post("/api/pair", pair)
-  app.router.add_get("/api/state", get_state)
+  def shell_request():
+    return request.method in ("GET", "HEAD") and (request.endpoint == "static" or request.path in PAGE_PATHS or request.path == "/api/onroad")
 
-  app.add_routes(backups.routes)
-  app.add_routes(dashcam.routes)
-  app.add_routes(device.routes)
-  app.add_routes(doors.routes)
-  app.add_routes(home.routes)
-  app.add_routes(keys.routes)
-  app.add_routes(maps.routes)
-  app.add_routes(models.routes)
-  app.add_routes(navigation.routes)
-  app.add_routes(screen_recordings.routes)
-  app.add_routes(search.routes)
-  app.add_routes(software.routes)
-  app.add_routes(tailscale.routes)
-  app.add_routes(theme_maker.routes)
-  app.add_routes(themes.routes)
-  app.add_routes(toggles.routes)
-  app.add_routes(tools.routes)
-  app.add_routes(vehicle.routes)
+  @app.before_request
+  def check_request():
+    if not helpers.host_allowed(request.scheme, request.host):
+      abort(421, "Unrecognized Host")
 
-  app.router.add_static("/assets", frogpilot_paths.THE_POND_ASSETS_PATH)
-  app.router.add_get("/{tail:.*}", index)
+    if request.method not in ("GET", "HEAD", "OPTIONS"):
+      origin = request.headers.get("Origin")
+      if origin is not None:
+        allowed = helpers.origin_allowed(origin, request.scheme, request.host, app.config["POND_PORTS"])
+      else:
+        allowed = helpers.referer_allowed(request.headers.get("Referer"), request.scheme, request.host, app.config["POND_PORTS"])
+      if not allowed:
+        abort(403, "Cross-origin request blocked")
+
+    if not shell_request() and device.is_driving():
+      abort(423, "Unavailable while driving. Shift into Park or go offroad to use The Pond.")
+
+  @app.after_request
+  def complete_response(response):
+    response.headers["Content-Security-Policy"] = CSP
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "same-origin"
+    response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
+
+    if request.path.startswith("/api/"):
+      response.headers["Cache-Control"] = "no-store"
+
+    if request.method != "HEAD" and response.is_streamed and 200 <= response.status_code < 300 and not shell_request():
+      response.response = locked_stream(response.response)
+
+    return response
+
+  @app.errorhandler(HTTPException)
+  def request_error(error):
+    response = error.get_response()
+    response.data = app.json.dumps({"error": error.description})
+    response.content_type = "application/json"
+    return response
+
+  @app.errorhandler(Exception)
+  def internal_error(error):
+    cloudlog.exception("The Pond could not complete a request")
+    return jsonify(error="Could not complete this request. Please try again."), 500
+
+  @app.get("/api/live/status")
+  def live_status():
+    from openpilot.common.realtime import DT_CTRL
+    import cereal.messaging as messaging
+    sm = messaging.SubMaster(["carState", "controlsState", "frogpilotPlan", "frogpilotRadarState", "modelV2"])
+    sm.update(0)
+    cs = sm["carState"] if sm.alive["carState"] else None
+    plan = sm["frogpilotPlan"] if sm.alive["frogpilotPlan"] else None
+    radar = sm["frogpilotRadarState"] if sm.alive["frogpilotRadarState"] else None
+    data = {
+      "vEgo": round(cs.vEgo * 3.6, 1) if cs else 0,
+      "vCruise": round(plan.vCruise * 3.6, 1) if plan else 0,
+      "standstill": bool(cs.standstill) if cs else False,
+      "enabled": bool(sm["controlsState"].enabled) if sm.alive["controlsState"] else False,
+      "forcingStop": bool(plan.forcingStop) if plan else False,
+      "cscControlling": bool(plan.cscControllingSpeed) if plan else False,
+      "leadLeft": {
+        "status": bool(radar.leadLeft.status) if radar else False,
+        "dRel": round(radar.leadLeft.dRel, 1) if radar and radar.leadLeft.status else 0,
+        "vLead": round(radar.leadLeft.vLead * 3.6, 1) if radar and radar.leadLeft.status else 0,
+      } if radar else {"status": False},
+      "leadRight": {
+        "status": bool(radar.leadRight.status) if radar else False,
+        "dRel": round(radar.leadRight.dRel, 1) if radar and radar.leadRight.status else 0,
+        "vLead": round(radar.leadRight.vLead * 3.6, 1) if radar and radar.leadRight.status else 0,
+      } if radar else {"status": False},
+    }
+    return jsonify(data)
+
+  @app.post("/api/experimental/driver_monitoring")
+  def set_driver_monitoring():
+    params = Params()
+    data = request.get_json(force=True)
+    enabled = bool(data.get("enabled", True))
+    # Common openpilot param for driver monitoring
+    params.put_bool("DriverMonitoring", enabled)
+    # Also set related FrogPilot params if present
+    try:
+      params.put_bool("HandsOnWheelMonitoring", enabled)
+    except Exception:
+      pass
+    return jsonify({"status": "ok", "enabled": enabled})
+
+  @app.get("/experimental/roundabout")
+  def experimental_roundabout_page():
+    return render_template("experimental/roundabout.html")
+
+  @app.get("/api/experimental/roundabout")
+  def get_roundabout_settings():
+    params = Params()
+    try:
+      data = {
+        "enabled": params.get_bool("RoundaboutYield") if params.check_key("RoundaboutYield") else True,
+        "speed_conflict": float(params.get("RoundaboutSpeedConflict") or 14),
+        "speed_no_conflict": float(params.get("RoundaboutSpeedNoConflict") or 29),
+        "speed_fallback": float(params.get("RoundaboutSpeedFallback") or 18),
+        "max_dist": float(params.get("RoundaboutMaxDist") or 20),
+        "min_vlead": float(params.get("RoundaboutMinVLead") or 1.0),
+        "min_yrel": float(params.get("RoundaboutMinYRel") or 0.8),
+        "stop_speed": float(params.get("RoundaboutStopSpeed") or 2),
+      }
+    except Exception:
+      data = {"enabled": True, "speed_conflict": 14, "speed_no_conflict": 29, "speed_fallback": 18,
+              "max_dist": 20, "min_vlead": 1.0, "min_yrel": 0.8, "stop_speed": 2}
+    return jsonify(data)
+
+  @app.post("/api/experimental/roundabout")
+  def set_roundabout_settings():
+    params = Params()
+    data = request.get_json(force=True)
+    try:
+      params.put_bool("RoundaboutYield", bool(data.get("enabled", True)))
+      params.put("RoundaboutSpeedConflict", str(data.get("speed_conflict", 14)))
+      params.put("RoundaboutSpeedNoConflict", str(data.get("speed_no_conflict", 29)))
+      params.put("RoundaboutSpeedFallback", str(data.get("speed_fallback", 18)))
+      params.put("RoundaboutMaxDist", str(data.get("max_dist", 20)))
+      params.put("RoundaboutMinVLead", str(data.get("min_vlead", 1.0)))
+      params.put("RoundaboutMinYRel", str(data.get("min_yrel", 0.8)))
+      params.put("RoundaboutStopSpeed", str(data.get("stop_speed", 2)))
+      return jsonify({"status": "ok"})
+    except Exception as e:
+      return jsonify({"status": "error", "message": str(e)}), 500
+
+  @app.get("/")
+  @app.get("/<path:path>")
+  def index(path=""):
+    if request.path not in PAGE_PATHS:
+      abort(404, "Page not found")
+
+    return render_template("index.html")
+
   return app
 
 
 def main():
-  frogpilot_utilities.delete_file(frogpilot_paths.THE_POND_VIDEOS_PATH, print_error=False)
-  for path in frogpilot_paths.THE_POND_THUMBNAILS_PATH.glob(".*"):
-    path.unlink()
-  dashcam.remove_stale_files(dashcam.get_routes())
-  screen_recordings.remove_stale_files()
-
+  app = create_app()
   if not PC:
+    threading.Thread(target=device.state.run, name="pond_state", daemon=True).start()
     threading.Thread(target=discovery.mdns_responder, name="pond_discovery", daemon=True).start()
+    discovery.redirect_port(PORT)
 
-  web.run_app(create_app(), access_log=None, handler_cancellation=True, port=frogpilot_variables.THE_POND_PORT, print=None)
+  app.run(host="0.0.0.0", port=PORT, threaded=True, debug=False)
 
 
 if __name__ == "__main__":

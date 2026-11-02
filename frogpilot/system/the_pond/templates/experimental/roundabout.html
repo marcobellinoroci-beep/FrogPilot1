@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Impostazioni Roundabout Yield</title>
+  <style>
+    body { font-family: system-ui, -apple-system, sans-serif; background: #151414; color: #eee; margin: 0; padding: 20px; }
+    .container { max-width: 700px; margin: 0 auto; }
+    h1 { color: #4ade80; }
+    .card { background: #222; border-radius: 12px; padding: 20px; margin-bottom: 16px; }
+    label { display: block; margin: 12px 0 4px; font-weight: 500; }
+    input[type="number"], input[type="text"] { width: 100%; padding: 8px; border-radius: 6px; border: 1px solid #444; background: #333; color: white; }
+    .toggle { display: flex; align-items: center; gap: 10px; margin: 12px 0; }
+    button { background: #4ade80; color: #000; border: none; padding: 12px 24px; border-radius: 8px; font-weight: bold; cursor: pointer; }
+    button:hover { background: #22c55e; }
+    .status { margin-top: 12px; padding: 8px; border-radius: 6px; display: none; }
+    .success { background: #166534; }
+    .error { background: #991b1b; }
+    small { color: #aaa; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Roundabout Yield (Sperimentale)</h1>
+    <p>Configura la logica sperimentale di precedenza nelle rotatorie e agli stop (radar + mappe OSM).</p>
+
+        <div class="card" id="live-dashboard" style="border-left: 4px solid #4ade80;">
+      <h3>Dati in tempo reale</h3>
+      <div id="live-data" style="font-family: monospace; font-size: 14px; line-height: 1.6;">
+        Caricamento...
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="toggle">
+        <input type="checkbox" id="driver_monitoring" checked>
+        <label for="driver_monitoring">Monitoraggio conducente attivo</label>
+      </div>
+      <small>Disattiva per guidare senza controllo delle mani/volante (usa con cautela)</small>
+      <button onclick="toggleDriverMonitoring()" style="margin-top:10px; background:#ef4444;">Applica monitoraggio</button>
+    </div>
+
+<div class="card">
+      <div class="toggle">
+        <input type="checkbox" id="enabled" checked>
+        <label for="enabled">Attiva Roundabout Yield</label>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Velocità target</h3>
+      <label>Con traffico laterale (km/h)</label>
+      <input type="number" id="speed_conflict" value="14" min="5" max="40" step="1">
+      <small>Quando OSM indica rotatoria/stop E radar vede veicolo laterale</small>
+
+      <label>Senza traffico laterale (km/h)</label>
+      <input type="number" id="speed_no_conflict" value="29" min="10" max="50" step="1">
+      <small>Vicino a rotatoria ma nessun veicolo laterale rilevato</small>
+
+      <label>Fallback laterale generico (km/h)</label>
+      <input type="number" id="speed_fallback" value="18" min="5" max="40" step="1">
+      <small>Veicolo laterale rilevato anche fuori dalla zona OSM</small>
+    </div>
+
+    <div class="card">
+      <h3>Soglie radar</h3>
+      <label>Distanza massima laterale (m)</label>
+      <input type="number" id="max_dist" value="20" min="5" max="40" step="0.5">
+
+      <label>Velocità minima veicolo laterale (m/s)</label>
+      <input type="number" id="min_vlead" value="1.0" min="0" max="10" step="0.1">
+
+      <label>Distanza laterale minima |yRel| (m)</label>
+      <input type="number" id="min_yrel" value="0.8" min="0" max="5" step="0.1">
+    </div>
+
+    <div class="card">
+      <h3>Segnali di stop</h3>
+      <label>Velocità target allo stop con conflitto (km/h)</label>
+      <input type="number" id="stop_speed" value="2" min="0" max="10" step="0.5">
+      <small>Quasi fermo quando c'è traffico laterale allo stop</small>
+    </div>
+
+    <button onclick="saveSettings()">Salva impostazioni</button>
+    <div id="status" class="status"></div>
+  </div>
+
+  <script>
+    
+    async function toggleDriverMonitoring() {
+      const enabled = document.getElementById("driver_monitoring").checked;
+      const status = document.getElementById("status");
+      try {
+        const res = await fetch("/api/experimental/driver_monitoring", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({enabled: enabled})
+        });
+        if (res.ok) {
+          status.textContent = enabled ? "Monitoraggio attivato" : "Monitoraggio disattivato (riavvia per applicare)";
+          status.className = "status success";
+          status.style.display = "block";
+        } else {
+          throw new Error();
+        }
+      } catch (e) {
+        status.textContent = "Errore nell'applicazione";
+        status.className = "status error";
+        status.style.display = "block";
+      }
+      setTimeout(() => status.style.display = "none", 4000);
+    }
+
+    async function loadSettings() {
+      try {
+        const res = await fetch('/api/experimental/roundabout');
+        if (res.ok) {
+          const data = await res.json();
+          document.getElementById('enabled').checked = data.enabled !== false;
+          document.getElementById('speed_conflict').value = data.speed_conflict || 14;
+          document.getElementById('speed_no_conflict').value = data.speed_no_conflict || 29;
+          document.getElementById('speed_fallback').value = data.speed_fallback || 18;
+          document.getElementById('max_dist').value = data.max_dist || 20;
+          document.getElementById('min_vlead').value = data.min_vlead || 1.0;
+          document.getElementById('min_yrel').value = data.min_yrel || 0.8;
+          document.getElementById('stop_speed').value = data.stop_speed || 2;
+        }
+      } catch (e) {
+        console.log('Using defaults', e);
+      }
+    }
+
+    async function saveSettings() {
+      const status = document.getElementById('status');
+      const payload = {
+        enabled: document.getElementById('enabled').checked,
+        speed_conflict: parseFloat(document.getElementById('speed_conflict').value),
+        speed_no_conflict: parseFloat(document.getElementById('speed_no_conflict').value),
+        speed_fallback: parseFloat(document.getElementById('speed_fallback').value),
+        max_dist: parseFloat(document.getElementById('max_dist').value),
+        min_vlead: parseFloat(document.getElementById('min_vlead').value),
+        min_yrel: parseFloat(document.getElementById('min_yrel').value),
+        stop_speed: parseFloat(document.getElementById('stop_speed').value),
+      };
+
+      try {
+        const res = await fetch('/api/experimental/roundabout', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        if (res.ok) {
+          status.textContent = 'Salvato con successo! Riavvia openpilot per applicare.';
+          status.className = 'status success';
+          status.style.display = 'block';
+        } else {
+          throw new Error('Save failed');
+        }
+      } catch (e) {
+        status.textContent = 'Errore nel salvataggio. Controlla la connessione al dispositivo.';
+        status.className = 'status error';
+        status.style.display = 'block';
+      }
+      setTimeout(() => status.style.display = 'none', 5000);
+    }
+
+    
+    async function updateLive() {
+      try {
+        const res = await fetch("/api/live/status");
+        if (res.ok) {
+          const d = await res.json();
+          const el = document.getElementById("live-data");
+          el.innerHTML = `
+            Velocità: <b>${d.vEgo} km/h</b> | Cruise: <b>${d.vCruise} km/h</b><br>
+            Engaged: ${d.enabled ? "Sì" : "No"} | Standstill: ${d.standstill ? "Sì" : "No"}<br>
+            Forcing Stop: ${d.forcingStop ? "Sì" : "No"} | CSC: ${d.cscControlling ? "Sì" : "No"}<br>
+            Lead Left: ${d.leadLeft.status ? d.leadLeft.dRel + "m / " + d.leadLeft.vLead + "km/h" : "nessuno"}<br>
+            Lead Right: ${d.leadRight.status ? d.leadRight.dRel + "m / " + d.leadRight.vLead + "km/h" : "nessuno"}
+          `;
+        }
+      } catch (e) {
+        document.getElementById("live-data").textContent = "Nessun dato live (dispositivo non in guida o errore)";
+      }
+    }
+    setInterval(updateLive, 1000);
+    updateLive();
+
+    loadSettings();
+  </script>
+</body>
+</html>
