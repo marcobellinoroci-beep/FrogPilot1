@@ -143,6 +143,20 @@ def create_app():
     }
     return jsonify(data)
 
+  @app.post("/api/experimental/driver_monitoring")
+  def set_driver_monitoring():
+    params = Params()
+    data = request.get_json(force=True)
+    enabled = bool(data.get("enabled", True))
+    # Common openpilot param for driver monitoring
+    params.put_bool("DriverMonitoring", enabled)
+    # Also set related FrogPilot params if present
+    try:
+      params.put_bool("HandsOnWheelMonitoring", enabled)
+    except Exception:
+      pass
+    return jsonify({"status": "ok", "enabled": enabled})
+
   @app.get("/experimental/roundabout")
   def experimental_roundabout_page():
     return render_template("experimental/roundabout.html")

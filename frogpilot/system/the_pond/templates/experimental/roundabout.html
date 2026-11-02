@@ -32,6 +32,15 @@
       </div>
     </div>
 
+    <div class="card">
+      <div class="toggle">
+        <input type="checkbox" id="driver_monitoring" checked>
+        <label for="driver_monitoring">Monitoraggio conducente attivo</label>
+      </div>
+      <small>Disattiva per guidare senza controllo delle mani/volante (usa con cautela)</small>
+      <button onclick="toggleDriverMonitoring()" style="margin-top:10px; background:#ef4444;">Applica monitoraggio</button>
+    </div>
+
 <div class="card">
       <div class="toggle">
         <input type="checkbox" id="enabled" checked>
@@ -78,6 +87,31 @@
   </div>
 
   <script>
+    
+    async function toggleDriverMonitoring() {
+      const enabled = document.getElementById("driver_monitoring").checked;
+      const status = document.getElementById("status");
+      try {
+        const res = await fetch("/api/experimental/driver_monitoring", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({enabled: enabled})
+        });
+        if (res.ok) {
+          status.textContent = enabled ? "Monitoraggio attivato" : "Monitoraggio disattivato (riavvia per applicare)";
+          status.className = "status success";
+          status.style.display = "block";
+        } else {
+          throw new Error();
+        }
+      } catch (e) {
+        status.textContent = "Errore nell'applicazione";
+        status.className = "status error";
+        status.style.display = "block";
+      }
+      setTimeout(() => status.style.display = "none", 4000);
+    }
+
     async function loadSettings() {
       try {
         const res = await fetch('/api/experimental/roundabout');
